@@ -2,8 +2,7 @@ namespace CuReporter
 
 open System.Net.Http
 open System.Text
-open System.Text.Json
-open System.Text.Json.Serialization
+open Thoth.Json.Net
 open CuReporter.Config
 
 module Discord =
@@ -13,23 +12,17 @@ module Discord =
     let private log msg =
         if debugMode then printfn "[DEBUG] %s" msg
 
-    [<CLIMutable>]
     type private WebhookPayload = {
-        content: string
-        username: string
+        Content: string
+        Username: string
     }
-
-    let private jsonOptions =
-        let options = JsonSerializerOptions(PropertyNamingPolicy = JsonNamingPolicy.CamelCase)
-        options.Converters.Add(JsonFSharpConverter())
-        options
 
     let sendMessage (config: DiscordConfig) (message: string) : Async<Result<unit, string>> =
         async {
             use client = new HttpClient()
 
-            let payload = { content = message; username = "ClickUp Reporter" }
-            let json = JsonSerializer.Serialize(payload, jsonOptions)
+            let payload = { Content = message; Username = "ClickUp Reporter" }
+            let json = Encode.Auto.toString(0, payload, caseStrategy = CamelCase)
 
             log (sprintf "POST %s" config.WebhookUrl)
             log (sprintf "Payload: %s" json)

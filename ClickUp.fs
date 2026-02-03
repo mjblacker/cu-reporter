@@ -2,8 +2,7 @@ namespace CuReporter
 
 open System
 open System.Net.Http
-open System.Text.Json
-open System.Text.Json.Serialization
+open Thoth.Json.Net
 open CuReporter.Types
 open CuReporter.Config
 
@@ -13,12 +12,6 @@ module ClickUp =
 
     let private log msg =
         if debugMode then printfn "[DEBUG] %s" msg
-
-    let private jsonOptions =
-        let options = JsonSerializerOptions(PropertyNameCaseInsensitive = true)
-        let fsOptions = JsonFSharpOptions.Default().WithSkippableOptionFields()
-        options.Converters.Add(JsonFSharpConverter(fsOptions))
-        options
 
     type private TimeEntryUser = {
         Id: int
@@ -51,7 +44,6 @@ module ClickUp =
 
     type private TaskHistoryItem = {
         Id: string
-        [<JsonPropertyName("type")>]
         Type: int
         Date: string
         Field: string option
@@ -112,8 +104,9 @@ module ClickUp =
                 if not response.IsSuccessStatusCode then
                     return Error (sprintf "Failed to fetch task %s" taskId)
                 else
-                    let task = JsonSerializer.Deserialize<TaskDetailResponse>(content, jsonOptions)
-                    return Ok task
+                    match Decode.Auto.fromString<TaskDetailResponse>(content, caseStrategy = CamelCase) with
+                    | Ok task -> return Ok task
+                    | Error msg -> return Error msg
             with ex ->
                 return Error ex.Message
         }
@@ -139,7 +132,9 @@ module ClickUp =
                 if not response.IsSuccessStatusCode then
                     return Error (sprintf "ClickUp API error (%O): %s" response.StatusCode content)
                 else
-                    let parsed = JsonSerializer.Deserialize<TimeEntriesResponse>(content, jsonOptions)
+                    match Decode.Auto.fromString<TimeEntriesResponse>(content, caseStrategy = CamelCase) with
+                    | Error msg -> return Error (sprintf "JSON parse error: %s" msg)
+                    | Ok parsed ->
                     log (sprintf "Parsed %d time entries" parsed.Data.Length)
 
                     let entries =
@@ -199,7 +194,9 @@ module ClickUp =
                 if not response.IsSuccessStatusCode then
                     return Error (sprintf "ClickUp API error (%O): %s" response.StatusCode content)
                 else
-                    let parsed = JsonSerializer.Deserialize<TasksResponse>(content, jsonOptions)
+                    match Decode.Auto.fromString<TasksResponse>(content, caseStrategy = CamelCase) with
+                    | Error msg -> return Error (sprintf "JSON parse error: %s" msg)
+                    | Ok parsed ->
                     log (sprintf "Parsed %d updated tasks" parsed.Tasks.Length)
 
                     let updates =
