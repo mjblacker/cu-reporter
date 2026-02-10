@@ -68,10 +68,23 @@ module Report =
         let dateStr = report.Date.ToString("yyyy-MM-dd")
         let header = sprintf "# 📋 Daily Work Report - %s" dateStr
 
-        log (sprintf "Formatting for Discord: %d summaries, %d task updates" report.Summaries.Length taskUpdates.Length)
+        // Get all task IDs that have time tracked
+        let trackedTaskIds =
+            report.Summaries
+            |> List.collect (fun s -> s.TimeEntries)
+            |> List.choose (fun e -> e.TaskId)
+            |> Set.ofList
+
+        // Filter out task updates for tasks that already have time tracked
+        let untrackedTaskUpdates =
+            taskUpdates
+            |> List.filter (fun t -> not (Set.contains t.TaskId trackedTaskIds))
+
+        log (sprintf "Formatting for Discord: %d summaries, %d task updates (%d with time tracked, %d without)"
+            report.Summaries.Length taskUpdates.Length trackedTaskIds.Count untrackedTaskUpdates.Length)
 
         let summarySection =
-            if report.Summaries.IsEmpty && taskUpdates.IsEmpty then
+            if report.Summaries.IsEmpty && untrackedTaskUpdates.IsEmpty then
                 "\nNo activity recorded for this day."
             else
                 let personSummaries =
@@ -87,9 +100,9 @@ module Report =
 
                 let totalTimeStr = formatDuration report.TotalTrackedTime
                 if String.IsNullOrEmpty personSummaries then
-                    sprintf "\n## 📊 Summary\nNo time tracked.\n\n**Updated Tasks:** %d" taskUpdates.Length
+                    sprintf "\n## 📊 Summary\nNo time tracked.\n\n**Updated Tasks:** %d" untrackedTaskUpdates.Length
                 else
-                    sprintf "\n## 📊 Summary\n%s\n\n**Total Team Time:** %s | **Updated Tasks:** %d" personSummaries totalTimeStr taskUpdates.Length
+                    sprintf "\n## 📊 Summary\n%s\n\n**Total Team Time:** %s | **Updated Tasks:** %d" personSummaries totalTimeStr untrackedTaskUpdates.Length
 
         let timeTrackingDetails =
             report.Summaries
@@ -117,11 +130,11 @@ module Report =
             |> String.concat "\n\n"
 
         let updatedTasksSection =
-            if taskUpdates.IsEmpty then
+            if untrackedTaskUpdates.IsEmpty then
                 ""
             else
                 let tasksByList =
-                    taskUpdates
+                    untrackedTaskUpdates
                     |> List.groupBy (fun t -> t.ListName |> Option.defaultValue "(No list)")
                     |> List.map (fun (listName, tasks) ->
                         let taskLines =
@@ -155,12 +168,24 @@ module Report =
     let formatForConsole (report: DailyReport) (taskUpdates: TaskUpdate list) : string =
         let sb = System.Text.StringBuilder()
 
+        // Get all task IDs that have time tracked
+        let trackedTaskIds =
+            report.Summaries
+            |> List.collect (fun s -> s.TimeEntries)
+            |> List.choose (fun e -> e.TaskId)
+            |> Set.ofList
+
+        // Filter out task updates for tasks that already have time tracked
+        let untrackedTaskUpdates =
+            taskUpdates
+            |> List.filter (fun t -> not (Set.contains t.TaskId trackedTaskIds))
+
         let dateStr = report.Date.ToString("yyyy-MM-dd")
         sb.AppendLine(sprintf "Daily Work Report - %s" dateStr) |> ignore
         sb.AppendLine(String.replicate 50 "=") |> ignore
         sb.AppendLine() |> ignore
 
-        if report.Summaries.IsEmpty && taskUpdates.IsEmpty then
+        if report.Summaries.IsEmpty && untrackedTaskUpdates.IsEmpty then
             sb.AppendLine("No activity recorded for this day.") |> ignore
         else
             sb.AppendLine("SUMMARY") |> ignore
@@ -176,7 +201,7 @@ module Report =
 
             sb.AppendLine() |> ignore
             sb.AppendLine(sprintf "Total Team Time: %s" (formatDuration report.TotalTrackedTime)) |> ignore
-            sb.AppendLine(sprintf "Updated Tasks: %d" taskUpdates.Length) |> ignore
+            sb.AppendLine(sprintf "Updated Tasks: %d" untrackedTaskUpdates.Length) |> ignore
             sb.AppendLine() |> ignore
 
             if not report.Summaries.IsEmpty then
@@ -206,13 +231,13 @@ module Report =
                             let name = taskName |> Option.defaultValue "(No task)"
                             sb.AppendLine(sprintf "      - %s: %s" name (formatDuration taskTime)) |> ignore
 
-            if not taskUpdates.IsEmpty then
+            if not untrackedTaskUpdates.IsEmpty then
                 sb.AppendLine() |> ignore
                 sb.AppendLine("UPDATED TASKS (no time tracked)") |> ignore
                 sb.AppendLine(String.replicate 50 "-") |> ignore
 
                 let tasksByList =
-                    taskUpdates
+                    untrackedTaskUpdates
                     |> List.groupBy (fun t -> t.ListName |> Option.defaultValue "(No list)")
 
                 for (listName, tasks) in tasksByList do
