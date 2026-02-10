@@ -42,6 +42,20 @@ module ClickUp =
         Data: TimeEntryResponse list
     }
 
+    type private TeamMember = {
+        User: TimeEntryUser
+    }
+
+    type private TeamResponse = {
+        Id: string
+        Name: string
+        Members: TeamMember list
+    }
+
+    type private TeamsResponse = {
+        Teams: TeamResponse list
+    }
+
     type private TaskHistoryItem = {
         Id: string
         Type: int
@@ -111,6 +125,89 @@ module ClickUp =
                 return Error ex.Message
         }
 
+    let private mapTimeEntries (entries: TimeEntryResponse list) : TimeEntry list =
+        entries
+        |> List.map (fun e ->
+            let duration =
+                match Int64.TryParse(e.Duration) with
+                | true, ms -> TimeSpan.FromMilliseconds(float ms)
+                | false, _ -> TimeSpan.Zero
+
+            let start =
+                match Int64.TryParse(e.Start) with
+                | true, ms -> fromUnixMillis ms
+                | false, _ -> DateTimeOffset.MinValue
+
+            let endTime =
+                e.End |> Option.bind (fun s ->
+                    match Int64.TryParse(s) with
+                    | true, ms -> Some (fromUnixMillis ms)
+                    | false, _ -> None)
+
+            {
+                Id = e.Id
+                TaskId = e.Task |> Option.map (fun t -> t.Id)
+                TaskName = e.Task |> Option.map (fun t -> t.Name)
+                ListName = e.Task |> Option.bind (fun t -> t.List) |> Option.map (fun l -> l.Name)
+                UserId = string e.User.Id
+                UserName = e.User.Username
+                Duration = duration
+                Start = start
+                End = endTime
+            })
+
+    let private getWorkspaceMembers (client: HttpClient) (workspaceId: string) : Async<Result<TimeEntryUser list, string>> =
+        async {
+            try
+                let url = "team"
+                log (sprintf "GET %s" url)
+                let! response = client.GetAsync(url) |> Async.AwaitTask
+                let! content = response.Content.ReadAsStringAsync() |> Async.AwaitTask
+                log (sprintf "Response (%O): %s" response.StatusCode (if content.Length > 1000 then content.Substring(0, 1000) + "..." else content))
+
+                if not response.IsSuccessStatusCode then
+                    return Error (sprintf "ClickUp API error (%O): %s" response.StatusCode content)
+                else
+                    match Decode.Auto.fromString<TeamsResponse>(content, caseStrategy = CamelCase) with
+                    | Error msg -> return Error (sprintf "JSON parse error: %s" msg)
+                    | Ok parsed ->
+                        match parsed.Teams |> List.tryFind (fun t -> t.Id = workspaceId) with
+                        | None ->
+                            return Error (sprintf "Workspace %s not found. Ensure the token can access this workspace." workspaceId)
+                        | Some team ->
+                            let members =
+                                team.Members
+                                |> List.map (fun m -> m.User)
+                                |> List.distinctBy (fun u -> u.Id)
+                            log (sprintf "Found %d workspace members" members.Length)
+                            return Ok members
+            with ex ->
+                return Error (sprintf "Failed to fetch workspace members: %s" ex.Message)
+        }
+
+    let private getTimeEntriesForUser (client: HttpClient) (workspaceId: string) (user: TimeEntryUser) (startMs: int64) (endMs: int64) : Async<Result<TimeEntry list, string>> =
+        async {
+            let userLabel = if String.IsNullOrWhiteSpace(user.Username) then string user.Id else user.Username
+            let url = sprintf "team/%s/time_entries?start_date=%d&end_date=%d&assignee=%d" workspaceId startMs endMs user.Id
+            log (sprintf "GET %s (user: %s)" url userLabel)
+
+            try
+                let! response = client.GetAsync(url) |> Async.AwaitTask
+                let! content = response.Content.ReadAsStringAsync() |> Async.AwaitTask
+                log (sprintf "Response (%O): %s" response.StatusCode (if content.Length > 1000 then content.Substring(0, 1000) + "..." else content))
+
+                if not response.IsSuccessStatusCode then
+                    return Error (sprintf "ClickUp API error (%O) for user %s: %s" response.StatusCode userLabel content)
+                else
+                    match Decode.Auto.fromString<TimeEntriesResponse>(content, caseStrategy = CamelCase) with
+                    | Error msg -> return Error (sprintf "JSON parse error for user %s: %s" userLabel msg)
+                    | Ok parsed ->
+                        log (sprintf "Parsed %d time entries for %s" parsed.Data.Length userLabel)
+                        return Ok (mapTimeEntries parsed.Data)
+            with ex ->
+                return Error (sprintf "Failed to fetch time entries for %s: %s" userLabel ex.Message)
+        }
+
     let getTimeEntries (config: ClickUpConfig) (date: DateOnly) : Async<Result<TimeEntry list, string>> =
         async {
             use client = createHttpClient config.ApiKey
@@ -121,56 +218,33 @@ module ClickUp =
             let startMs = toUnixMillis startOfDay
             let endMs = toUnixMillis endOfDay
 
-            let url = sprintf "team/%s/time_entries?start_date=%d&end_date=%d" config.WorkspaceId startMs endMs
-            log (sprintf "GET %s" url)
+            let! membersResult = getWorkspaceMembers client config.WorkspaceId
 
-            try
-                let! response = client.GetAsync(url) |> Async.AwaitTask
-                let! content = response.Content.ReadAsStringAsync() |> Async.AwaitTask
-                log (sprintf "Response (%O): %s" response.StatusCode (if content.Length > 1000 then content.Substring(0, 1000) + "..." else content))
-
-                if not response.IsSuccessStatusCode then
-                    return Error (sprintf "ClickUp API error (%O): %s" response.StatusCode content)
+            match membersResult with
+            | Error msg -> return Error msg
+            | Ok members ->
+                if members.IsEmpty then
+                    return Ok []
                 else
-                    match Decode.Auto.fromString<TimeEntriesResponse>(content, caseStrategy = CamelCase) with
-                    | Error msg -> return Error (sprintf "JSON parse error: %s" msg)
-                    | Ok parsed ->
-                    log (sprintf "Parsed %d time entries" parsed.Data.Length)
+                    let! entryResults =
+                        members
+                        |> List.map (fun memberUser -> getTimeEntriesForUser client config.WorkspaceId memberUser startMs endMs)
+                        |> Async.Parallel
 
-                    let entries =
-                        parsed.Data
-                        |> List.map (fun e ->
-                            let duration =
-                                match Int64.TryParse(e.Duration) with
-                                | true, ms -> TimeSpan.FromMilliseconds(float ms)
-                                | false, _ -> TimeSpan.Zero
+                    let errors = entryResults |> Array.choose (function | Error msg -> Some msg | Ok _ -> None)
 
-                            let start =
-                                match Int64.TryParse(e.Start) with
-                                | true, ms -> fromUnixMillis ms
-                                | false, _ -> DateTimeOffset.MinValue
+                    if errors.Length > 0 then
+                        return Error (sprintf "Failed to fetch time entries for %d workspace members: %s" errors.Length (String.concat " | " errors))
+                    else
+                        let entries =
+                            entryResults
+                            |> Array.choose (function | Ok entryList -> Some entryList | Error _ -> None)
+                            |> Array.toList
+                            |> List.collect id
+                            |> List.distinctBy (fun entry -> entry.Id)
 
-                            let endTime =
-                                e.End |> Option.bind (fun s ->
-                                    match Int64.TryParse(s) with
-                                    | true, ms -> Some (fromUnixMillis ms)
-                                    | false, _ -> None)
-
-                            {
-                                Id = e.Id
-                                TaskId = e.Task |> Option.map (fun t -> t.Id)
-                                TaskName = e.Task |> Option.map (fun t -> t.Name)
-                                ListName = e.Task |> Option.bind (fun t -> t.List) |> Option.map (fun l -> l.Name)
-                                UserId = string e.User.Id
-                                UserName = e.User.Username
-                                Duration = duration
-                                Start = start
-                                End = endTime
-                            })
-
-                    return Ok entries
-            with ex ->
-                return Error (sprintf "Failed to fetch time entries: %s" ex.Message)
+                        log (sprintf "Aggregated %d time entries across %d members" entries.Length members.Length)
+                        return Ok entries
         }
 
     let getUpdatedTasks (config: ClickUpConfig) (date: DateOnly) : Async<Result<TaskUpdate list, string>> =
