@@ -63,6 +63,11 @@ workspace_id = "YOUR_WORKSPACE_ID_HERE"
 
 [discord]
 webhook_url = "https://discord.com/api/webhooks/YOUR_WEBHOOK_URL"
+
+[report]
+# Optional exclusions applied to "Updated Tasks (no time tracked)" based on task name.
+exclude_starts_with = ["[BO"]
+exclude_contains = []
 ```
 
 ## Usage

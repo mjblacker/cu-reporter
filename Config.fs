@@ -16,9 +16,15 @@ module Config =
         WebhookUrl: string
     }
 
+    type ReportConfig = {
+        ExcludeStartsWith: string list
+        ExcludeContains: string list
+    }
+
     type AppConfig = {
         ClickUp: ClickUpConfig
         Discord: DiscordConfig
+        Report: ReportConfig
     }
 
     let private getConfigDirectory () =
@@ -47,6 +53,26 @@ module Config =
         | true, value -> value :?> TomlTable
         | false, _ -> failwithf "Missing required config section: [%s]" key
 
+    let private tryGetTable (table: TomlTable) (key: string) =
+        match table.TryGetValue(key) with
+        | true, value -> Some (value :?> TomlTable)
+        | false, _ -> None
+
+    let private tryGetStringList (table: TomlTable) (key: string) : string list option =
+        match table.TryGetValue(key) with
+        | false, _ -> None
+        | true, (:? string as s) -> Some [ s ]
+        | true, (:? TomlArray as arr) ->
+            arr
+            |> Seq.cast<obj>
+            |> Seq.map (function
+                | :? string as s -> s
+                | other -> failwithf "Config key '%s' must be a string or array of strings (found: %s)" key (other.GetType().Name))
+            |> Seq.toList
+            |> Some
+        | true, value ->
+            failwithf "Config key '%s' must be a string or array of strings (found: %s)" key (value.GetType().Name)
+
     let load (path: string option) : Result<AppConfig, string> =
         let configPath = path |> Option.defaultWith getConfigPath
 
@@ -59,6 +85,16 @@ module Config =
 
                 let clickupTable = getTable model "clickup"
                 let discordTable = getTable model "discord"
+                let reportTable = tryGetTable model "report"
+
+                let reportConfig =
+                    match reportTable with
+                    | None -> { ExcludeStartsWith = []; ExcludeContains = [] }
+                    | Some t ->
+                        {
+                            ExcludeStartsWith = tryGetStringList t "exclude_starts_with" |> Option.defaultValue []
+                            ExcludeContains = tryGetStringList t "exclude_contains" |> Option.defaultValue []
+                        }
 
                 Ok {
                     ClickUp = {
@@ -68,6 +104,7 @@ module Config =
                     Discord = {
                         WebhookUrl = getString discordTable "webhook_url"
                     }
+                    Report = reportConfig
                 }
             with ex ->
                 Error $"Failed to parse config: {ex.Message}"
@@ -87,6 +124,11 @@ workspace_id = "YOUR_WORKSPACE_ID_HERE"
 
 [discord]
 webhook_url = "https://discord.com/api/webhooks/YOUR_WEBHOOK_URL"
+
+[report]
+# Optional exclusions applied to "Updated Tasks (no time tracked)" based on task name.
+exclude_starts_with = []
+exclude_contains = []
 """
 
         if File.Exists(configPath) then

@@ -88,8 +88,30 @@ module Program =
                 eprintfn "Error: %s" msg
                 1
             | Ok (timeEntries, taskUpdates) ->
+                let taskUpdates, excludedCount =
+                    let shouldExclude (taskName: string) =
+                        let startsWithMatch =
+                            config.Report.ExcludeStartsWith
+                            |> List.exists (fun prefix ->
+                                not (String.IsNullOrWhiteSpace prefix) &&
+                                taskName.StartsWith(prefix, StringComparison.Ordinal))
+
+                        let containsMatch =
+                            config.Report.ExcludeContains
+                            |> List.exists (fun substr ->
+                                not (String.IsNullOrWhiteSpace substr) &&
+                                taskName.Contains(substr, StringComparison.Ordinal))
+
+                        startsWithMatch || containsMatch
+
+                    let filtered = taskUpdates |> List.filter (fun t -> not (shouldExclude t.TaskName))
+                    filtered, (taskUpdates.Length - filtered.Length)
+
                 if verbose then
-                    printfn "Found %d time entries and %d updated tasks" timeEntries.Length taskUpdates.Length
+                    if excludedCount > 0 then
+                        printfn "Found %d time entries and %d updated tasks (%d excluded)" timeEntries.Length taskUpdates.Length excludedCount
+                    else
+                        printfn "Found %d time entries and %d updated tasks" timeEntries.Length taskUpdates.Length
 
                 let report = buildReport date timeEntries taskUpdates
 
